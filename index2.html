@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>USIU Study Pod Booking System</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .form-group { margin-bottom: 10px; }
+    #errors { color: red; margin-bottom: 10px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    #insights { margin-top: 20px; }
+    #undoButton { margin-top: 10px; background-color: #f0ad4e; }
+  </style>
+</head>
+<body>
+  <h1>Study Pod Booking System</h1>
+  <div id="bookingForm">
+    <div id="errors"></div>
+    <div class="form-group">
+      <label for="podSelect">Pod:</label>
+      <select id="podSelect"></select>
+    </div>
+    <div class="form-group">
+      <label for="timeInput">Time:</label>
+      <input type="time" id="timeInput" step="3600">
+    </div>
+    <div class="form-group">
+      <label for="studentIdsInput">Student IDs (comma-separated):</label>
+      <input type="text" id="studentIdsInput">
+    </div>
+    <button id="bookButton">Book</button>
+    <button id="undoButton" disabled>Undo Last Booking</button>
+  </div>
+
+  <table id="bookingsTable">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Pod</th>
+        <th>Time</th>
+        <th># Students</th>
+        <th>Student IDs</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <div id="insights"></div>
+
+  <script>
+    const pods = [
+      { id: "POD-A", capacity: 4 },
+      { id: "POD-B", capacity: 4 },
+      { id: "POD-C", capacity: 4 },
+    ];
+
+    let bookings = [
+      { podId: "POD-A", time: "09:00", students: ["SIT-001", "SIT-045"] },
+      { podId: "POD-B", time: "10:00", students: ["SMC-210"] },
+    ];
+
+    // Stack to store booking history for undo functionality
+    let bookingHistoryStack = [];
+    
+    let duplicateAttempts = 0;
+
+    const podSelect = document.getElementById("podSelect");
+    const timeInput = document.getElementById("timeInput");
+    const studentIdsInput = document.getElementById("studentIdsInput");
+    const errorDiv = document.getElementById("errors");
+    const tableBody = document.querySelector("#bookingsTable tbody");
+    const insightsDiv = document.getElementById("insights");
+    const undoButton = document.getElementById("undoButton");
+
+    // Populate pod options
+    pods.forEach(pod => {
+      const option = document.createElement("option");
+      option.value = pod.id;
+      option.textContent = pod.id;
+      podSelect.appendChild(option);
+    });
+
+    document.getElementById("bookButton").addEventListener("click", () => {
+      errorDiv.textContent = "";
+      const podId = podSelect.value;
+      const time = timeInput.value;
+      const studentIds = parseStudentIds(studentIdsInput.value);
+
+      if (!isWithinOperatingHours(time)) {
+        return showError("Time must be between 08:00 and 19:59.");
+      }
+
+      if (studentIds.length === 0) {
+        return showError("At least one student ID is required.");
+      }
+
+      for (let id of studentIds) {
+        if (!id) return showError("Invalid student ID found.");
+      }
+
+      const existing = findBooking(podId, time);
+      if (existing && existing.students.length + studentIds.length > 4) {
+        return showError("Capacity exceeded: only 4 students per pod per hour allowed.");
+      }
+
+      for (let id of studentIds) {
+        if (existing && existing.students.includes(id)) {
+          duplicateAttempts++;
+          return showError(`Duplicate booking: ${id} already booked in this pod and time.`);
+        }
+
+        if (hasCrossPodClash(id, time, podId)) {
+          duplicateAttempts++;
+          return showError(`Cross-pod clash: ${id} is booked in another pod at this time.`);
+        }
+      }
+
+      // Before making changes, save current state to history stack
+      if (existing) {
+        // For existing bookings, save a copy of the original state
+        bookingHistoryStack.push({
+          type: "update",
+          podId,
+          time,
+          previousStudents: [...existing.students],
+          addedStudents: studentIds
+        });
+        existing.students.push(...studentIds);
+      } else {
+        // For new bookings, save the entire booking
+        const newBooking = { podId, time, students: studentIds };
+        bookingHistoryStack.push({
+          type: "create",
+          booking: JSON.parse(JSON.stringify(newBooking))
+        });
+        bookings.push(newBooking);
+      }
+
+      // Enable undo button since we have history now
+      undoButton.disabled = bookingHistoryStack.length === 0;
+
+      studentIdsInput.value = "";
+      studentIdsInput.focus();
+
+      renderTable();
+      recomputeInsights();
+    });
+
+    // Undo Last Booking functionality
+    undoButton.addEventListener("click", () => {
+      if (bookingHistoryStack.length === 0) return;
+
+      const lastAction = bookingHistoryStack.pop();
+      
+      if (lastAction.type === "create") {
+        // Remove the booking that was added
+        const index = bookings.findIndex(
+          b => b.podId === lastAction.booking.podId && 
+               b.time === lastAction.booking.time && 
+               JSON.stringify(b.students) === JSON.stringify(lastAction.booking.students)
+        );
+        if (index !== -1) {
+          bookings.splice(index, 1);
+        }
+      } else if (lastAction.type === "update") {
+        // Revert the students list to previous state
+        const booking = findBooking(lastAction.podId, lastAction.time);
+        if (booking) {
+          booking.students = lastAction.previousStudents;
+        }
+      }
+
+      // Disable undo button if stack is empty
+      undoButton.disabled = bookingHistoryStack.length === 0;
+
+      renderTable();
+      recomputeInsights();
+    });
+
+    function parseStudentIds(input) {
+      return input.split(",")
+        .map(id => id.trim().toUpperCase())
+        .filter(id => id);
+    }
+
+    function isWithinOperatingHours(time) {
+      return time >= "08:00" && time < "20:00";
+    }
+
+    function findBooking(podId, time) {
+      for (let b of bookings) {
+        if (b.podId === podId && b.time === time) return b;
+      }
+      return null;
+    }
+
+    function hasCrossPodClash(studentId, time, podId) {
+      for (let b of bookings) {
+        if (b.time === time && b.podId !== podId && b.students.includes(studentId)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function renderTable() {
+      tableBody.innerHTML = "";
+      for (let i = 0; i < bookings.length; i++) {
+        const row = document.createElement("tr");
+        row.innerHTML = `
+          <td>${i + 1}</td>
+          <td>${bookings[i].podId}</td>
+          <td>${bookings[i].time}</td>
+          <td>${bookings[i].students.length}</td>
+          <td>${bookings[i].students.join(", ")}</td>
+          <td><button data-index="${i}" class="removeBtn">Remove</button></td>
+        `;
+        tableBody.appendChild(row);
+      }
+    }
+
+    document.getElementById("bookingsTable").addEventListener("click", e => {
+      if (e.target.classList.contains("removeBtn")) {
+        const index = +e.target.dataset.index;
+        // Before removing, save to history stack
+        bookingHistoryStack.push({
+          type: "remove",
+          booking: JSON.parse(JSON.stringify(bookings[index]))
+        });
+        undoButton.disabled = false;
+        
+        bookings.splice(index, 1);
+        renderTable();
+        recomputeInsights();
+      }
+    });
+
+    function recomputeInsights() {
+      let totalBookings = bookings.length;
+      let uniqueStudents = [];
+      let hourMap = {};
+      let podStats = {};
+
+      for (let b of bookings) {
+        b.students.forEach(id => {
+          if (!uniqueStudents.includes(id)) uniqueStudents.push(id);
+        });
+
+        hourMap[b.time] = (hourMap[b.time] || 0) + b.students.length;
+
+        podStats[b.podId] = podStats[b.podId] || { slots: 0, seats: 0 };
+        podStats[b.podId].slots++;
+        podStats[b.podId].seats += b.students.length;
+      }
+
+      let busiestHour = Object.keys(hourMap).reduce((a, b) => hourMap[a] > hourMap[b] ? a : b, "");
+
+      let html = `
+        <p>Total bookings: ${totalBookings}</p>
+        <p>Unique students: ${uniqueStudents.length}</p>
+        <p>Busiest hour: ${busiestHour}</p>
+      `;
+
+      html += `<ul>`;
+      for (let podId in podStats) {
+        const maxSeats = pods.find(p => p.id === podId).capacity * podStats[podId].slots;
+        const fillRate = roundToOneDecimal((podStats[podId].seats / maxSeats) * 100);
+        html += `<li>${podId}: ${fillRate}% fill rate</li>`;
+      }
+      html += `</ul>`;
+
+      html += `<p>Flagged duplicate attempts: ${duplicateAttempts}</p>`;
+
+      insightsDiv.innerHTML = html;
+    }
+
+    function roundToOneDecimal(num) {
+      return Math.round(num * 10) / 10;
+    }
+
+    function showError(msg) {
+      errorDiv.textContent = msg;
+    }
+
+    // Initial render
+    renderTable();
+    recomputeInsights();
+  </script>
+</body>
+</html>
